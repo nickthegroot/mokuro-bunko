@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from mokuro_bunko.ocr.installer import OCRInstaller
+from mokuro_bunko.library_index import cbz_language_is_ja_or_null
 
 
 # Supported manga file extensions
@@ -78,9 +79,13 @@ class OCRProcessor:
         return cbz_path.with_suffix(".webp")
 
     def needs_mokuro_sidecar(self, cbz_path: Path) -> bool:
-        """Check whether a CBZ file is missing mokuro sidecar output."""
+        """Check whether a CBZ file is missing or needs mokuro sidecar output."""
         if not cbz_path.is_file() or cbz_path.suffix.lower() != ".cbz":
             return False
+
+        if not cbz_language_is_ja_or_null(cbz_path):
+            return False
+
         sidecar_plain, sidecar_gz = self.get_mokuro_sidecar_paths(cbz_path)
         return not sidecar_plain.exists() and not sidecar_gz.exists()
 

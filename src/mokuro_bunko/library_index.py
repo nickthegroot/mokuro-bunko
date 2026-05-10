@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 import threading
 import time
+import xml.etree.ElementTree as ET
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -44,6 +46,23 @@ class LibrarySnapshot:
             if series.name == name:
                 return series
         return None
+
+
+def cbz_language_is_ja_or_null(cbz_path: Path) -> bool:
+    """Return True if ComicInfo.xml LanguageISO is ja, missing, or unreadable."""
+    try:
+        with zipfile.ZipFile(cbz_path, "r") as zf:
+            for name in zf.namelist():
+                if name.lower() == "comicinfo.xml":
+                    with zf.open(name) as f:
+                        tree = ET.parse(f)
+                        root = tree.getroot()
+                        language = root.find("LanguageISO")
+                        return language is None or language.text == "ja"
+    except (zipfile.BadZipFile, OSError, ET.ParseError):
+        return True
+    return True
+
 
 
 class LibraryIndexCache:
