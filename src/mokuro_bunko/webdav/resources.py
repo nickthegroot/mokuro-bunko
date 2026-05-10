@@ -41,13 +41,19 @@ class PathMapper:
         /mokuro-reader/{series}/{file}   - Shared manga files (CBZ etc.)
 
     Physical structure:
-        {storage_base}/library/          - Shared manga library
+        {storage_base}/library/          - Shared manga library (supports nesting)
         {storage_base}/inbox/            - OCR upload queue
         {storage_base}/users/{username}/ - Per-user data
+
+    Path flattening:
+        Nested physical paths are flattened in virtual paths using '--' delimiter.
+        Example: library/Favorites/SeriesA/ -> /mokuro-reader/Favorites--SeriesA/
+        This avoids %2F encoding issues since WSGI decodes URLs before routing.
     """
 
     READER_ROOT = "mokuro-reader"
     PER_USER_FILES = frozenset({"volume-data.json", "profiles.json"})
+    FLATTEN_DELIMITER = "--"
 
     def __init__(self, storage_base: Path) -> None:
         """Initialize path mapper.
@@ -73,6 +79,52 @@ class PathMapper:
             raise ValueError("Invalid username path")
         user_dir.mkdir(parents=True, exist_ok=True)
         return user_dir
+
+    @staticmethod
+    def _escape_component(component: str) -> str:
+        """Escape delimiter in a path component to prevent ambiguity.
+
+        Replaces '--' with '-\x00-' (using null byte which is illegal in filenames)
+        to handle edge cases where folder names contain the delimiter.
+        """
+        return component.replace("--", "-\x00-")
+
+    @staticmethod
+    def _unescape_component(component: str) -> str:
+        """Unescape a path component."""
+        return component.replace("-\x00-", "--")
+
+    def flatten_path(self, relative_parts: tuple[str, ...]) -> str:
+        """Convert physical path components to a flattened virtual name.
+
+        Args:
+            relative_parts: Tuple of path components (e.g., ('Favorites', 'SeriesA')).
+
+        Returns:
+            Flattened name using delimiter (e.g., 'Favorites--SeriesA').
+        """
+        if not relative_parts:
+            return ""
+        escaped = [self._escape_component(p) for p in relative_parts]
+        return self.FLATTEN_DELIMITER.join(escaped)
+
+    def unflatten_path(self, flattened: str) -> tuple[str, ...]:
+        """Convert a flattened virtual name back to path components.
+
+        Args:
+            flattened: Flattened name (e.g., 'Favorites--SeriesA').
+
+        Returns:
+            Tuple of path components (e.g., ('Favorites', 'SeriesA')).
+        """
+        if not flattened:
+            return ()
+        parts = flattened.split(self.FLATTEN_DELIMITER)
+        return tuple(self._unescape_component(p) for p in parts)
+
+    def is_flattened_name(self, name: str) -> bool:
+        """Check if a name contains the flatten delimiter."""
+        return self.FLATTEN_DELIMITER in name
 
     def get_user_file_path(self, username: str, filename: str) -> Optional[Path]:
         """Safely resolve a per-user file path under users/{username}/."""
@@ -140,8 +192,20 @@ class PathMapper:
                     return self.get_user_file_path(username, relative)
                 return None
 
-            # Everything else maps to shared library
-            return safe_resolve_under(self.library_path, relative)
+            # Check if this is a nested path (contains the delimiter)
+            # Split by '/' first to get path components, then unflatten each
+            parts = relative.split("/")
+            physical_parts: list[str] = []
+            for part in parts:
+                if self.FLATTEN_DELIMITER in part:
+                    # This is a flattened nested path - unflatten it
+                    unflattened = self.unflatten_path(part)
+                    physical_parts.extend(unflattened)
+                else:
+                    physical_parts.append(part)
+
+            physical_relative = "/".join(physical_parts)
+            return safe_resolve_under(self.library_path, physical_relative)
 
         # /inbox paths
         if virtual_path == "/inbox" or virtual_path.startswith("/inbox/"):
@@ -178,10 +242,30 @@ class PathMapper:
         if not parts:
             return "/"
 
-        # library/* -> /mokuro-reader/*
+        # library/* -> /mokuro-reader/* (with flattening for nested paths)
         if parts[0] == "library":
             if len(parts) > 1:
-                return f"/{self.READER_ROOT}/" + "/".join(parts[1:])
+                # Flatten nested directory paths
+                # For files: library/Favorites/SeriesA/vol1.cbz -> /mokuro-reader/Favorites--SeriesA/vol1.cbz
+                # For folders: library/Favorites/SeriesA -> /mokuro-reader/Favorites--SeriesA
+                all_parts = parts[1:]  # Everything after 'library/'
+
+                # Check if this is a directory (folder) path
+                physical_check = self.library_path.joinpath(*all_parts)
+                if physical_check.is_dir():
+                    # It's a directory - flatten all parts
+                    flattened = self.flatten_path(all_parts)
+                    return f"/{self.READER_ROOT}/{flattened}"
+                else:
+                    # It's a file or doesn't exist - keep filename separate
+                    filename = all_parts[-1]  # Last component is the file/folder name
+                    dir_parts = all_parts[:-1]  # Directory components to flatten
+
+                    if dir_parts:
+                        flattened_dirs = self.flatten_path(dir_parts)
+                        return f"/{self.READER_ROOT}/{flattened_dirs}/{filename}"
+                    else:
+                        return f"/{self.READER_ROOT}/{filename}"
             return f"/{self.READER_ROOT}"
 
         # inbox/* -> /inbox/*
@@ -654,27 +738,56 @@ class MokuroFolderResource(DAVCollection):
 
         # /mokuro-reader: merge per-user files + shared library contents
         if normalized == f"/{PathMapper.READER_ROOT}":
-            members: list[str] = []
+            members: set[str] = set()
 
             # Per-user JSON files (only if they exist for this user)
             if username:
-                for name in sorted(PathMapper.PER_USER_FILES):
+                for name in PathMapper.PER_USER_FILES:
                     file_path = self.path_mapper.get_user_file_path(username, name)
                     if file_path and file_path.exists():
-                        members.append(name)
+                        members.add(name)
 
-            # Shared library contents — use scandir to cache entry metadata
+            # Shared library contents - list all CBZ-containing directories
+            # Flatten nested paths; keep single-level paths as-is
             try:
-                cache: dict[str, os.DirEntry[str]] = {}
-                with os.scandir(self.path_mapper.library_path) as it:
-                    for entry in it:
-                        cache[entry.name] = entry
-                self._scandir_cache = cache
-                members.extend(sorted(cache.keys()))
+                library_root = self.path_mapper.library_path
+
+                # Collect directories containing CBZ files
+                cbz_dirs: set[Path] = set()
+                for root, dirs, files in os.walk(library_root):
+                    # Skip hidden directories
+                    dirs[:] = [d for d in dirs if not d.startswith(".")]
+
+                    # Check if this directory has CBZ files
+                    has_cbz = any(f.lower().endswith(".cbz") for f in files)
+                    if has_cbz:
+                        cbz_dirs.add(Path(root))
+
+                # Convert to member names
+                for cbz_dir in cbz_dirs:
+                    try:
+                        rel_path = cbz_dir.relative_to(library_root)
+                    except ValueError:
+                        continue
+
+                    parts = rel_path.parts
+                    if len(parts) == 0:
+                        # Root library - add CBZ files directly
+                        for f in cbz_dir.iterdir():
+                            if f.is_file() and f.suffix.lower() == ".cbz":
+                                members.add(f.name)
+                    elif len(parts) == 1:
+                        # Single-level directory (e.g., "series") - add as-is
+                        members.add(parts[0])
+                    else:
+                        # Nested directory - flatten (e.g., "Favorites/SeriesA" -> "Favorites--SeriesA")
+                        flattened = self.path_mapper.flatten_path(parts)
+                        members.add(flattened)
+
             except OSError:
                 pass
 
-            return members
+            return sorted(members)
 
         # Physical folder: list filesystem contents
         if self.folder_path:
@@ -742,13 +855,29 @@ class MokuroFolderResource(DAVCollection):
                     )
                 return None
 
+            # Check if this is a flattened nested path (e.g., "Favorites--SeriesA")
+            # Unflatten and resolve
+            if self.path_mapper.FLATTEN_DELIMITER in name:
+                unflattened_parts = self.path_mapper.unflatten_path(name)
+                physical = self.path_mapper.library_path.joinpath(*unflattened_parts)
+                if physical.is_dir():
+                    return MokuroFolderResource(
+                        member_path,
+                        self.environ,
+                        physical,
+                        self.path_mapper,
+                    )
+                elif physical.exists():
+                    return MokuroFileResource(member_path, self.environ, physical)
+                return None
+
             # Fast path: use cached scandir entry (no stat/resolve needed)
             if self._scandir_cache and name in self._scandir_cache:
                 return self._resource_from_entry(
                     member_path, self._scandir_cache[name],
                 )
 
-            # Fallback for uncached lookups
+            # Fallback for uncached lookups (flat path)
             physical = safe_resolve_under(self.path_mapper.library_path, name)
             if physical is None:
                 return None

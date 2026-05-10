@@ -18,7 +18,7 @@ in
 
     package = mkOption {
       type = types.package;
-      default = pkgs.mokuro-bunko;
+      default = pkgs.callPackage ./package.nix { };
       description = "The mokuro-bunko package to use.";
     };
 
@@ -113,14 +113,13 @@ in
     };
 
     # Ensure the base directory exists with correct ownership before the service starts.
-    systemd.tmpfiles.rules =
-      [
-        "d ${basePath} 0770 ${cfg.user} ${cfg.group} -"
-      ]
-      ++ optionals (cfg.data_path != null) [
-        # Symlink <basePath>/library → data_path
-        "L+ ${basePath}/library - - - - ${cfg.data_path}"
-      ];
+    systemd.tmpfiles.rules = [
+      "d ${basePath} 0770 ${cfg.user} ${cfg.group} -"
+    ]
+    ++ optionals (cfg.data_path != null) [
+      # Symlink <basePath>/library → data_path
+      "L+ ${basePath}/library - - - - ${cfg.data_path}"
+    ];
 
     systemd.services.mokuro-bunko = {
       description = "Mokuro Bunko Server";
@@ -143,7 +142,8 @@ in
         Environment = [
           "MOKURO_BUNKO_OCR_ENV=${pkgs.callPackage ./ocr-env.nix { }}"
         ];
-      } // optionalAttrs (cfg.data_path != null) {
+      }
+      // optionalAttrs (cfg.data_path != null) {
         # Make the external data_path visible inside the service's filesystem view.
         BindPaths = [ cfg.data_path ];
       };

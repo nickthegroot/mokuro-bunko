@@ -7,7 +7,7 @@ import urllib.parse
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
-from mokuro_bunko.library_index import LibraryIndexCache
+from mokuro_bunko.library_index import LibraryIndexCache, unflatten_path
 from mokuro_bunko.security import is_within_path
 
 # Static files directory
@@ -166,13 +166,19 @@ class CatalogAPI:
         return self._json_response(start_response, 200, data)
 
     def _get_series(self, start_response: Callable[..., Any], series_name: str) -> list[bytes]:
-        """Get volumes for a specific series."""
+        """Get volumes for a specific series (by flattened name)."""
         if self._library_index is None:
             return self._json_response(start_response, 404, {"error": "Not found"})
         if not self.storage_base_path:
             return self._json_response(start_response, 404, {"error": "Not found"})
-        series_dir = (self.storage_base_path / series_name).resolve()
-        if not is_within_path(series_dir, self.storage_base_path):
+
+        # series_name is the flattened name (e.g., "Favorites--SeriesA")
+        # Convert to physical path for security check
+        physical_parts = unflatten_path(series_name)
+        physical_path = Path(self.storage_base_path).joinpath(*physical_parts)
+        series_dir = physical_path.resolve()
+        library_path = Path(self.storage_base_path).resolve()
+        if not is_within_path(series_dir, library_path):
             return self._json_response(start_response, 403, {"error": "Forbidden"})
 
         snapshot = self._library_index.get_snapshot()
@@ -185,7 +191,7 @@ class CatalogAPI:
         volumes = []
         for volume in series.volumes:
             vol_info: dict[str, Any] = {"name": volume.name, "cover": volume.cover}
-            is_active = self._is_active_ocr_volume(progress, series_name, volume.name)
+            is_active = self._is_active_ocr_volume(progress, series._physical_path, volume.name)
             vol_info["ocr_pending"] = volume.has_cbz and not volume.has_mokuro and not volume.has_mokuro_gz
             vol_info["ocr_active"] = is_active
             if is_active:

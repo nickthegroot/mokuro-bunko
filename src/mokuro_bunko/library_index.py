@@ -12,6 +12,10 @@ from pathlib import Path
 from typing import Optional
 
 
+# Delimiter for flattening nested paths (matches PathMapper.FLATTEN_DELIMITER)
+FLATTEN_DELIMITER = "--"
+
+
 @dataclass(frozen=True)
 class VolumeSnapshot:
     """Indexed metadata for a single logical volume stem."""
@@ -25,11 +29,17 @@ class VolumeSnapshot:
 
 @dataclass(frozen=True)
 class SeriesSnapshot:
-    """Indexed metadata for a single series folder."""
+    """Indexed metadata for a single series folder.
+
+    The name is a flattened representation of nested paths.
+    Example: "Favorites/SeriesA" -> "Favorites--SeriesA"
+    """
 
     name: str
     cover: Optional[str]
     volumes: tuple[VolumeSnapshot, ...]
+    # Physical path relative to library root (for internal use)
+    _physical_path: str
 
 
 @dataclass(frozen=True)
@@ -62,6 +72,50 @@ def cbz_language_is_ja_or_null(cbz_path: Path) -> bool:
     except (zipfile.BadZipFile, OSError, ET.ParseError):
         return True
     return True
+
+
+def _escape_component(component: str) -> str:
+    """Escape delimiter in a path component to prevent ambiguity.
+
+    Replaces '--' with '-\x00-' (using null byte which is illegal in filenames)
+    to handle edge cases where folder names contain the delimiter.
+    """
+    return component.replace("--", "-\x00-")
+
+
+def _unescape_component(component: str) -> str:
+    """Unescape a path component."""
+    return component.replace("-\x00-", "--")
+
+
+def flatten_path(parts: tuple[str, ...]) -> str:
+    """Convert path components to a flattened name using delimiter.
+
+    Args:
+        parts: Tuple of path components (e.g., ('Favorites', 'SeriesA')).
+
+    Returns:
+        Flattened name (e.g., 'Favorites--SeriesA').
+    """
+    if not parts:
+        return ""
+    escaped = [_escape_component(p) for p in parts]
+    return FLATTEN_DELIMITER.join(escaped)
+
+
+def unflatten_path(flattened: str) -> tuple[str, ...]:
+    """Convert a flattened name back to path components.
+
+    Args:
+        flattened: Flattened name (e.g., 'Favorites--SeriesA').
+
+    Returns:
+        Tuple of path components (e.g., ('Favorites', 'SeriesA')).
+    """
+    if not flattened:
+        return ()
+    parts = flattened.split(FLATTEN_DELIMITER)
+    return tuple(_unescape_component(p) for p in parts)
 
 
 
@@ -157,11 +211,15 @@ class LibraryIndexCache:
                         pending_thumbnails += 1
 
                 if volumes:
+                    # Flatten the series path for WebDAV compatibility
+                    series_parts = tuple(series_name.split("/"))
+                    flattened_name = flatten_path(series_parts)
                     series_items.append(
                         SeriesSnapshot(
-                            name=series_name,
+                            name=flattened_name,
                             cover=series_cover,
                             volumes=tuple(volumes),
+                            _physical_path=series_name,
                         )
                     )
         except OSError:

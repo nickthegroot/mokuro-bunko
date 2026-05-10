@@ -48,7 +48,7 @@ def test_library_index_invalidate_forces_rescan(tmp_path: Path) -> None:
 
 
 def test_library_index_scans_nested_directories(tmp_path: Path) -> None:
-    """Recursive walk should include nested series paths."""
+    """Recursive walk should include nested series paths as flattened names."""
     library = tmp_path / "library"
     nested = library / "Group" / "Series C"
     nested.mkdir(parents=True)
@@ -58,7 +58,10 @@ def test_library_index_scans_nested_directories(tmp_path: Path) -> None:
     snapshot = index.get_snapshot()
 
     assert len(snapshot.series) == 1
-    assert snapshot.series[0].name == "Group/Series C"
+    # Nested paths are now flattened using '--' delimiter
+    assert snapshot.series[0].name == "Group--Series C"
+    # Physical path is stored separately
+    assert snapshot.series[0]._physical_path == "Group/Series C"
     assert snapshot.pending_ocr == (("Group/Series C", "v03"),)
 
 
