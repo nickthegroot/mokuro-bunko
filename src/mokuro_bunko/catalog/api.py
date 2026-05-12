@@ -161,7 +161,22 @@ class CatalogAPI:
                 series_info["volumes"].append(vol_info)
             series_list.append(series_info)
 
+        # Add oneshots if present
+        oneshots_list: list[dict[str, Any]] = []
+        if snapshot.oneshots:
+            for volume in snapshot.oneshots.volumes:
+                vol_info: dict[str, Any] = {
+                    "name": volume.name,
+                    "ocr_pending": volume.has_cbz and not volume.has_mokuro and not volume.has_mokuro_gz,
+                    "ocr_active": False,
+                }
+                if volume.cover is not None:
+                    vol_info["cover"] = volume.cover
+                oneshots_list.append(vol_info)
+
         data: dict[str, Any] = {"series": series_list}
+        if oneshots_list:
+            data["oneshots"] = oneshots_list
         data = self._patch_ocr_progress(data)
         return self._json_response(start_response, 200, data)
 

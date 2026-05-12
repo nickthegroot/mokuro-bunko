@@ -205,20 +205,14 @@ class PathMapper:
                     return self.get_user_file_path(username, relative)
                 return None
 
-            # Oneshots path
+            # Oneshots path - lookup by filename only
             if self.oneshots_path is not None and relative.startswith(f"{self.ONESHOTS_PREFIX}/"):
-                oneshots_relative = relative[len(f"{self.ONESHOTS_PREFIX}/"):]
-                # Unflatten nested paths in oneshots
-                parts = oneshots_relative.split("/")
-                physical_parts: list[str] = []
-                for part in parts:
-                    if self.FLATTEN_DELIMITER in part:
-                        unflattened = self.unflatten_path(part)
-                        physical_parts.extend(unflattened)
-                    else:
-                        physical_parts.append(part)
-                physical_relative = "/".join(physical_parts)
-                return safe_resolve_under(self.oneshots_path, physical_relative)
+                filename = relative[len(f"{self.ONESHOTS_PREFIX}/"):]
+                # Search recursively for the file by name
+                for root, dirs, files in os.walk(self.oneshots_path):
+                    if filename in files:
+                        return Path(root) / filename
+                return None
 
             # Check if this is a nested path (contains the delimiter)
             # Split by '/' first to get path components, then unflatten each
@@ -859,7 +853,7 @@ class MokuroFolderResource(DAVCollection):
 
             return sorted(members)
 
-        # /mokuro-reader/oneshots: list CBZ files with flattening
+        # /mokuro-reader/oneshots: list CBZ files (filename only)
         if normalized == f"/{PathMapper.READER_ROOT}/{PathMapper.ONESHOTS_PREFIX}":
             if self.path_mapper.oneshots_path is None:
                 return []
@@ -871,15 +865,8 @@ class MokuroFolderResource(DAVCollection):
                     for f in sorted(files):
                         if not f.lower().endswith(".cbz"):
                             continue
-                        rel_path = Path(root).relative_to(oneshots_root)
-                        volume_name = f[:-len(".cbz")]
-                        if rel_path.parts:
-                            flattened = self.path_mapper.flatten_path(
-                                (*rel_path.parts, volume_name)
-                            )
-                        else:
-                            flattened = volume_name
-                        oneshots_members.add(f"{flattened}.cbz")
+                        # Use filename only to avoid long path issues
+                        oneshots_members.add(f)
             except OSError:
                 pass
             return sorted(oneshots_members)
@@ -983,35 +970,16 @@ class MokuroFolderResource(DAVCollection):
                     member_path, self._scandir_cache[name],
                 )
 
-            # Oneshots folder lookup (unflatten nested paths)
+            # Oneshots folder lookup (search by filename)
             oneshots_path = self.path_mapper.oneshots_path
             if self.folder_path is not None and self.folder_path == oneshots_path:
-                if oneshots_path is not None and self.path_mapper.FLATTEN_DELIMITER in name:
-                    unflattened_parts = self.path_mapper.unflatten_path(name)
-                    physical = oneshots_path.joinpath(*unflattened_parts)
-                    if physical.exists():
-                        if physical.is_dir():
-                            return MokuroFolderResource(
-                                member_path,
-                                self.environ,
-                                physical,
-                                self.path_mapper,
-                            )
-                        return MokuroFileResource(member_path, self.environ, physical)
-                    return None
-                # Fallback for flat path
+                # Search recursively for the file by name
                 if oneshots_path is not None:
-                    physical = safe_resolve_under(oneshots_path, name)
-                    if physical is not None and physical.exists():
-                        if physical.is_dir():
-                            return MokuroFolderResource(
-                                member_path,
-                                self.environ,
-                                physical,
-                                self.path_mapper,
-                            )
-                        return MokuroFileResource(member_path, self.environ, physical)
-                    return MokuroFileResource(member_path, self.environ, physical) if physical else None
+                    for root, dirs, files in os.walk(oneshots_path):
+                        if name in files:
+                            physical = Path(root) / name
+                            return MokuroFileResource(member_path, self.environ, physical)
+                return None
 
             # Fallback for uncached lookups (flat path)
             physical = safe_resolve_under(self.path_mapper.library_path, name)

@@ -10,7 +10,8 @@ with lib;
 let
   cfg = config.services.mokuro-bunko;
   yamlFormat = pkgs.formats.yaml { };
-  basePath = cfg.settings.storage.base_path;
+  # Use user-provided base_path or default to /var/lib/mokuro-bunko
+  basePath = cfg.settings.storage.base_path or "/var/lib/mokuro-bunko";
 in
 {
   options.services.mokuro-bunko = {
@@ -70,12 +71,8 @@ in
         host = "0.0.0.0";
         port = 8080;
       };
-      storage = mkDefault {
-        base_path = "/var/lib/mokuro-bunko";
-        oneshots = mkDefault {
-          directory = null;
-        };
-      };
+      storage.base_path = mkDefault "/var/lib/mokuro-bunko";
+      storage.oneshots.directory = mkDefault null;
       registration = mkDefault {
         mode = "self";
         default_role = "registered";

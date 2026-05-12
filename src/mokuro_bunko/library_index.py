@@ -204,17 +204,13 @@ class LibraryIndexCache:
                         has_mokuro = f"{volume_name}.mokuro" in filenames
                         has_mokuro_gz = f"{volume_name}.mokuro.gz" in filenames
                         has_webp = f"{volume_name}.webp" in filenames
+                        # Use relative path for cover to match physical location
                         cover = f"{oneshots_rel}/{volume_name}.webp" if has_webp else None
 
-                        # Flatten the path: foo/bar/baz.cbz -> foo--baz.cbz
-                        if oneshots_rel:
-                            flattened_name = f"{oneshots_rel.replace('/', FLATTEN_DELIMITER)}--{volume_name}"
-                        else:
-                            flattened_name = volume_name
-
+                        # Use filename only to avoid long name issues
                         oneshots_volumes.append(
                             VolumeSnapshot(
-                                name=flattened_name,
+                                name=volume_name,
                                 has_cbz=has_cbz,
                                 has_mokuro=has_mokuro,
                                 has_mokuro_gz=has_mokuro_gz,
