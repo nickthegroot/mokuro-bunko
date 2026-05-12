@@ -43,10 +43,22 @@ class SeriesSnapshot:
 
 
 @dataclass(frozen=True)
+class OneshotsSnapshot:
+    """Indexed metadata for the oneshots directory.
+
+    The name is a flattened representation of nested paths.
+    Example: "foo/bar/baz.cbz" -> "foo--baz.cbz"
+    """
+
+    volumes: tuple[VolumeSnapshot, ...]
+
+
+@dataclass(frozen=True)
 class LibrarySnapshot:
     """Immutable snapshot returned by the shared library index."""
 
     series: tuple[SeriesSnapshot, ...]
+    oneshots: Optional[OneshotsSnapshot]
     pending_ocr: tuple[tuple[str, str], ...]
     pending_thumbnails: int
 
@@ -122,8 +134,14 @@ def unflatten_path(flattened: str) -> tuple[str, ...]:
 class LibraryIndexCache:
     """Time-based cached scanner for `storage/library`."""
 
-    def __init__(self, library_path: Path, ttl: float = 30.0) -> None:
+    def __init__(
+        self,
+        library_path: Path,
+        oneshots_path: Optional[Path] = None,
+        ttl: float = 30.0,
+    ) -> None:
         self.library_path = library_path
+        self.oneshots_path = oneshots_path
         self.ttl = ttl
         self._lock = threading.Lock()
         self._snapshot: Optional[LibrarySnapshot] = None
@@ -151,12 +169,68 @@ class LibraryIndexCache:
     def _scan_library(self) -> LibrarySnapshot:
         """Scan the entire library tree once (recursive walk) and build an immutable snapshot."""
         if not self.library_path.is_dir():
-            return LibrarySnapshot(series=(), pending_ocr=(), pending_thumbnails=0)
+            return LibrarySnapshot(
+                series=(),
+                oneshots=None,
+                pending_ocr=(),
+                pending_thumbnails=0,
+            )
 
         series_items: list[SeriesSnapshot] = []
+        oneshots_volumes: list[VolumeSnapshot] = []
         pending_ocr: list[tuple[float, str, str]] = []
         pending_thumbnails = 0
 
+        # Scan oneshots directory if configured
+        if self.oneshots_path is not None and self.oneshots_path.is_dir():
+            try:
+                oneshots_str = str(self.oneshots_path)
+                for dirpath, dirnames, filenames_list in os.walk(oneshots_str):
+                    dirnames[:] = [d for d in sorted(dirnames) if not d.startswith(".")]
+                    filenames = set(filenames_list)
+                    current_dir = Path(dirpath)
+
+                    try:
+                        oneshots_rel = current_dir.relative_to(self.oneshots_path).as_posix()
+                    except ValueError:
+                        continue
+
+                    for file_name in sorted(filenames):
+                        lower_name = file_name.lower()
+                        if not lower_name.endswith(".cbz"):
+                            continue
+                        volume_name = file_name[:-len(".cbz")]
+                        has_cbz = True
+                        has_mokuro = f"{volume_name}.mokuro" in filenames
+                        has_mokuro_gz = f"{volume_name}.mokuro.gz" in filenames
+                        has_webp = f"{volume_name}.webp" in filenames
+                        cover = f"{oneshots_rel}/{volume_name}.webp" if has_webp else None
+
+                        # Flatten the path: foo/bar/baz.cbz -> foo--baz.cbz
+                        if oneshots_rel:
+                            flattened_name = f"{oneshots_rel.replace('/', FLATTEN_DELIMITER)}--{volume_name}"
+                        else:
+                            flattened_name = volume_name
+
+                        oneshots_volumes.append(
+                            VolumeSnapshot(
+                                name=flattened_name,
+                                has_cbz=has_cbz,
+                                has_mokuro=has_mokuro,
+                                has_mokuro_gz=has_mokuro_gz,
+                                cover=cover,
+                            )
+                        )
+
+                        if not has_mokuro and not has_mokuro_gz:
+                            cbz_path = current_dir / f"{volume_name}.cbz"
+                            pending_ocr.append((self._created_timestamp(cbz_path), f"oneshots/{oneshots_rel}", volume_name))
+                        if has_cbz and f"{volume_name}.webp" not in filenames and f"{volume_name}.nocover" not in filenames:
+                            pending_thumbnails += 1
+            except OSError:
+                pass
+
+        # Scan library for series
         try:
             library_str = str(self.library_path)
             for dirpath, dirnames, filenames_list in os.walk(library_str):
@@ -171,6 +245,15 @@ class LibraryIndexCache:
 
                 if series_name.startswith("."):
                     continue
+
+                # Skip oneshots directory - it's handled separately
+                if self.oneshots_path is not None:
+                    try:
+                        oneshots_relative = current_dir.relative_to(self.library_path).as_posix()
+                        if oneshots_relative.startswith(self.oneshots_path.name):
+                            continue
+                    except ValueError:
+                        pass
 
                 # Index logical volumes from CBZ files only, so sidecar-only stems
                 # left behind by plain filesystem operations do not become phantom volumes.
@@ -223,11 +306,22 @@ class LibraryIndexCache:
                         )
                     )
         except OSError:
-            return LibrarySnapshot(series=(), pending_ocr=(), pending_thumbnails=0)
+            return LibrarySnapshot(
+                series=(),
+                oneshots=None,
+                pending_ocr=(),
+                pending_thumbnails=0,
+            )
 
         pending_ocr.sort(key=lambda item: (item[0], item[1], item[2]))
+        oneshots_snapshot: Optional[OneshotsSnapshot] = None
+        if oneshots_volumes:
+            oneshots_snapshot = OneshotsSnapshot(
+                volumes=tuple(sorted(oneshots_volumes, key=lambda v: v.name)),
+            )
         return LibrarySnapshot(
             series=tuple(series_items),
+            oneshots=oneshots_snapshot,
             pending_ocr=tuple((series_name, volume_name) for _, series_name, volume_name in pending_ocr),
             pending_thumbnails=pending_thumbnails,
         )

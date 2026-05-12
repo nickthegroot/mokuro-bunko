@@ -37,11 +37,13 @@ class PathMapper:
         /mokuro-reader/                  - Reader root (virtual, merged view)
         /mokuro-reader/volume-data.json  - Per-user progress data
         /mokuro-reader/profiles.json     - Per-user profile settings
+        /mokuro-reader/oneshots/         - Oneshots directory (optional)
         /mokuro-reader/{series}/         - Shared series folder
         /mokuro-reader/{series}/{file}   - Shared manga files (CBZ etc.)
 
     Physical structure:
         {storage_base}/library/          - Shared manga library (supports nesting)
+        {storage_base}/library/{oneshots}/ - Oneshots directory (optional)
         {storage_base}/inbox/            - OCR upload queue
         {storage_base}/users/{username}/ - Per-user data
 
@@ -52,19 +54,30 @@ class PathMapper:
     """
 
     READER_ROOT = "mokuro-reader"
+    ONESHOTS_PREFIX = "oneshots"
     PER_USER_FILES = frozenset({"volume-data.json", "profiles.json"})
     FLATTEN_DELIMITER = "--"
 
-    def __init__(self, storage_base: Path) -> None:
+    def __init__(
+        self,
+        library_path: Path,
+        oneshots_path: Optional[Path] = None,
+        inbox_path: Optional[Path] = None,
+        users_path: Optional[Path] = None,
+    ) -> None:
         """Initialize path mapper.
 
         Args:
-            storage_base: Base path for storage directory.
+            library_path: Path to the library (should be resolved).
+            oneshots_path: Optional path to the oneshots directory.
+            inbox_path: Path to the inbox directory.
+            users_path: Path to the users directory.
         """
-        self.storage_base = Path(storage_base)
-        self.library_path = self.storage_base / "library"
-        self.inbox_path = self.storage_base / "inbox"
-        self.users_path = self.storage_base / "users"
+        self.library_path = library_path
+        self.oneshots_path = oneshots_path
+        self.storage_base = library_path.parent
+        self.inbox_path = inbox_path or (self.storage_base / "inbox")
+        self.users_path = users_path or (self.storage_base / "users")
 
     def ensure_directories(self) -> None:
         """Create storage directories if they don't exist."""
@@ -192,10 +205,25 @@ class PathMapper:
                     return self.get_user_file_path(username, relative)
                 return None
 
+            # Oneshots path
+            if self.oneshots_path is not None and relative.startswith(f"{self.ONESHOTS_PREFIX}/"):
+                oneshots_relative = relative[len(f"{self.ONESHOTS_PREFIX}/"):]
+                # Unflatten nested paths in oneshots
+                parts = oneshots_relative.split("/")
+                physical_parts: list[str] = []
+                for part in parts:
+                    if self.FLATTEN_DELIMITER in part:
+                        unflattened = self.unflatten_path(part)
+                        physical_parts.extend(unflattened)
+                    else:
+                        physical_parts.append(part)
+                physical_relative = "/".join(physical_parts)
+                return safe_resolve_under(self.oneshots_path, physical_relative)
+
             # Check if this is a nested path (contains the delimiter)
             # Split by '/' first to get path components, then unflatten each
             parts = relative.split("/")
-            physical_parts: list[str] = []
+            physical_parts = []
             for part in parts:
                 if self.FLATTEN_DELIMITER in part:
                     # This is a flattened nested path - unflatten it
@@ -245,6 +273,26 @@ class PathMapper:
         # library/* -> /mokuro-reader/* (with flattening for nested paths)
         if parts[0] == "library":
             if len(parts) > 1:
+                # Check if this is under the oneshots directory
+                if (
+                    self.oneshots_path is not None
+                    and len(parts) >= 2
+                    and parts[1] == self.oneshots_path.name
+                ):
+                    # This is a oneshots file/directory
+                    oneshots_parts = parts[2:]  # Everything after library/{oneshots}/
+                    if not oneshots_parts:
+                        return f"/{self.READER_ROOT}/{self.ONESHOTS_PREFIX}"
+
+                    # Flatten nested paths (e.g., foo/bar/baz.cbz -> foo--baz.cbz)
+                    filename = oneshots_parts[-1]
+                    dir_parts = oneshots_parts[:-1]
+                    if dir_parts:
+                        flattened_dirs = self.flatten_path(dir_parts)
+                        return f"/{self.READER_ROOT}/{self.ONESHOTS_PREFIX}/{flattened_dirs}/{filename}"
+                    else:
+                        return f"/{self.READER_ROOT}/{self.ONESHOTS_PREFIX}/{filename}"
+
                 # Flatten nested directory paths
                 # For files: library/Favorites/SeriesA/vol1.cbz -> /mokuro-reader/Favorites--SeriesA/vol1.cbz
                 # For folders: library/Favorites/SeriesA -> /mokuro-reader/Favorites--SeriesA
@@ -747,6 +795,18 @@ class MokuroFolderResource(DAVCollection):
                     if file_path and file_path.exists():
                         members.add(name)
 
+            # Oneshots directory (if configured and has files)
+            if self.path_mapper.oneshots_path is not None:
+                oneshots_root = self.path_mapper.oneshots_path
+                if oneshots_root.exists() and oneshots_root.is_dir():
+                    has_cbz = any(
+                        f.is_file() and f.suffix.lower() == ".cbz"
+                        for f in oneshots_root.rglob("*")
+                        if f.is_file()
+                    )
+                    if has_cbz:
+                        members.add(PathMapper.ONESHOTS_PREFIX)
+
             # Shared library contents - list all CBZ-containing directories
             # Flatten nested paths; keep single-level paths as-is
             try:
@@ -757,6 +817,16 @@ class MokuroFolderResource(DAVCollection):
                 for root, dirs, files in os.walk(library_root):
                     # Skip hidden directories
                     dirs[:] = [d for d in dirs if not d.startswith(".")]
+
+                    # Skip oneshots directory - it's handled separately
+                    if self.path_mapper.oneshots_path is not None:
+                        try:
+                            current_rel = Path(root).relative_to(library_root)
+                            if str(current_rel).startswith(self.path_mapper.oneshots_path.name):
+                                dirs.clear()  # Don't descend into oneshots
+                                continue
+                        except ValueError:
+                            pass
 
                     # Check if this directory has CBZ files
                     has_cbz = any(f.lower().endswith(".cbz") for f in files)
@@ -788,6 +858,31 @@ class MokuroFolderResource(DAVCollection):
                 pass
 
             return sorted(members)
+
+        # /mokuro-reader/oneshots: list CBZ files with flattening
+        if normalized == f"/{PathMapper.READER_ROOT}/{PathMapper.ONESHOTS_PREFIX}":
+            if self.path_mapper.oneshots_path is None:
+                return []
+            oneshots_root = self.path_mapper.oneshots_path
+            oneshots_members: set[str] = set()
+            try:
+                for root, dirs, files in os.walk(oneshots_root):
+                    dirs[:] = [d for d in sorted(dirs) if not d.startswith(".")]
+                    for f in sorted(files):
+                        if not f.lower().endswith(".cbz"):
+                            continue
+                        rel_path = Path(root).relative_to(oneshots_root)
+                        volume_name = f[:-len(".cbz")]
+                        if rel_path.parts:
+                            flattened = self.path_mapper.flatten_path(
+                                (*rel_path.parts, volume_name)
+                            )
+                        else:
+                            flattened = volume_name
+                        oneshots_members.add(f"{flattened}.cbz")
+            except OSError:
+                pass
+            return sorted(oneshots_members)
 
         # Physical folder: list filesystem contents
         if self.folder_path:
@@ -855,6 +950,17 @@ class MokuroFolderResource(DAVCollection):
                     )
                 return None
 
+            # Oneshots directory
+            if name == PathMapper.ONESHOTS_PREFIX:
+                if self.path_mapper.oneshots_path is None:
+                    return None
+                return MokuroFolderResource(
+                    member_path,
+                    self.environ,
+                    self.path_mapper.oneshots_path,
+                    self.path_mapper,
+                )
+
             # Check if this is a flattened nested path (e.g., "Favorites--SeriesA")
             # Unflatten and resolve
             if self.path_mapper.FLATTEN_DELIMITER in name:
@@ -876,6 +982,36 @@ class MokuroFolderResource(DAVCollection):
                 return self._resource_from_entry(
                     member_path, self._scandir_cache[name],
                 )
+
+            # Oneshots folder lookup (unflatten nested paths)
+            oneshots_path = self.path_mapper.oneshots_path
+            if self.folder_path is not None and self.folder_path == oneshots_path:
+                if oneshots_path is not None and self.path_mapper.FLATTEN_DELIMITER in name:
+                    unflattened_parts = self.path_mapper.unflatten_path(name)
+                    physical = oneshots_path.joinpath(*unflattened_parts)
+                    if physical.exists():
+                        if physical.is_dir():
+                            return MokuroFolderResource(
+                                member_path,
+                                self.environ,
+                                physical,
+                                self.path_mapper,
+                            )
+                        return MokuroFileResource(member_path, self.environ, physical)
+                    return None
+                # Fallback for flat path
+                if oneshots_path is not None:
+                    physical = safe_resolve_under(oneshots_path, name)
+                    if physical is not None and physical.exists():
+                        if physical.is_dir():
+                            return MokuroFolderResource(
+                                member_path,
+                                self.environ,
+                                physical,
+                                self.path_mapper,
+                            )
+                        return MokuroFileResource(member_path, self.environ, physical)
+                    return MokuroFileResource(member_path, self.environ, physical) if physical else None
 
             # Fallback for uncached lookups (flat path)
             physical = safe_resolve_under(self.path_mapper.library_path, name)

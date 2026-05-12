@@ -12,7 +12,7 @@ from mokuro_bunko.webdav.resources import PathMapper
 @pytest.fixture
 def mapper(temp_dir: Path) -> PathMapper:
     """Create a path mapper with temporary storage."""
-    return PathMapper(temp_dir)
+    return PathMapper(temp_dir / "library")
 
 
 class TestPathMapperInit:
@@ -20,19 +20,19 @@ class TestPathMapperInit:
 
     def test_sets_storage_base(self, temp_dir: Path) -> None:
         """Test storage base path is set."""
-        mapper = PathMapper(temp_dir)
+        mapper = PathMapper(temp_dir / "library")
         assert mapper.storage_base == temp_dir
 
     def test_derived_paths(self, temp_dir: Path) -> None:
         """Test derived path properties."""
-        mapper = PathMapper(temp_dir)
+        mapper = PathMapper(temp_dir / "library")
         assert mapper.library_path == temp_dir / "library"
         assert mapper.inbox_path == temp_dir / "inbox"
         assert mapper.users_path == temp_dir / "users"
 
     def test_ensure_directories(self, temp_dir: Path) -> None:
         """Test directory creation."""
-        mapper = PathMapper(temp_dir)
+        mapper = PathMapper(temp_dir / "library")
         mapper.ensure_directories()
 
         assert mapper.library_path.exists()

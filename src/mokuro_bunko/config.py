@@ -48,21 +48,32 @@ class ServerConfig:
 
 
 @dataclass
+class OneshotsConfig:
+    """Oneshots directory configuration."""
+
+    directory: Optional[str] = None
+
+
+@dataclass
 class StorageConfig:
     """Storage configuration."""
 
     base_path: Path = field(default_factory=get_default_storage_path)
+    oneshots: OneshotsConfig = field(default_factory=OneshotsConfig)
 
     def __post_init__(self) -> None:
         if isinstance(self.base_path, str):
             self.base_path = Path(self.base_path)
         # Expand user home directory
         self.base_path = self.base_path.expanduser()
+        # Handle dict -> OneshotsConfig conversion from YAML deserialization
+        if isinstance(self.oneshots, dict):
+            self.oneshots = OneshotsConfig(**self.oneshots)
 
     @property
     def library_path(self) -> Path:
         """Path to the shared manga library."""
-        return self.base_path / "library"
+        return (self.base_path / "library").resolve()
 
     @property
     def inbox_path(self) -> Path:
@@ -74,12 +85,21 @@ class StorageConfig:
         """Path to per-user data."""
         return self.base_path / "users"
 
+    @property
+    def oneshots_path(self) -> Optional[Path]:
+        """Path to the oneshots directory, if configured."""
+        if self.oneshots.directory is None:
+            return None
+        return self.library_path / self.oneshots.directory
+
     def ensure_directories(self) -> None:
         """Create storage directories if they don't exist."""
         self.library_path.mkdir(parents=True, exist_ok=True)
         self.inbox_path.mkdir(parents=True, exist_ok=True)
         self.users_path.mkdir(parents=True, exist_ok=True)
         (self.library_path / "thumbnails").mkdir(exist_ok=True)
+        if self.oneshots_path is not None:
+            self.oneshots_path.mkdir(parents=True, exist_ok=True)
 
 
 @dataclass
@@ -257,6 +277,9 @@ class Config:
             },
             "storage": {
                 "base_path": str(self.storage.base_path),
+                "oneshots": {
+                    "directory": self.storage.oneshots.directory,
+                },
             },
             "registration": {
                 "mode": self.registration.mode,
@@ -386,6 +409,7 @@ _CONFIG_TYPES: dict[str, type] = {
     "server.port": int,
     "server.host": str,
     "storage.base_path": Path,
+    "storage.oneshots.directory": str,
     "registration.mode": str,
     "registration.default_role": str,
     "registration.allow_anonymous_browse": bool,

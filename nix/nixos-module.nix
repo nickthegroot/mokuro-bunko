@@ -72,6 +72,9 @@ in
       };
       storage = mkDefault {
         base_path = "/var/lib/mokuro-bunko";
+        oneshots = mkDefault {
+          directory = null;
+        };
       };
       registration = mkDefault {
         mode = "self";

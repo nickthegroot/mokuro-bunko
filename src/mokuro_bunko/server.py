@@ -42,7 +42,12 @@ def create_wsgidav_app(config: Config) -> WsgiDAVApp:
         Configured WsgiDAV application.
     """
     # Create provider
-    provider = MokuroDAVProvider(config.storage.base_path)
+    provider = MokuroDAVProvider(
+        config.storage.library_path,
+        config.storage.oneshots_path,
+        config.storage.inbox_path,
+        config.storage.users_path,
+    )
 
     # WsgiDAV configuration
     dav_config: dict[str, Any] = {
@@ -138,7 +143,11 @@ def create_app(
     # Wrap with PROPFIND cache (caches Depth:infinity responses + gzip)
     propfind_cache = PropfindCacheMiddleware(app, ttl=120.0)
     app = propfind_cache
-    library_index = LibraryIndexCache(config.storage.library_path, ttl=30.0)
+    library_index = LibraryIndexCache(
+        config.storage.library_path,
+        config.storage.oneshots_path,
+        ttl=30.0,
+    )
 
     # Wrap with admin API (innermost, after dav_app)
     if config.admin.enabled:

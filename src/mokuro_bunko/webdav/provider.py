@@ -30,15 +30,24 @@ class MokuroDAVProvider(DAVProvider):
     - /mokuro-reader/ shows shared manga library + per-user progress
     """
 
-    def __init__(self, storage_base: Path) -> None:
+    def __init__(
+        self,
+        library_path: Path,
+        oneshots_path: Optional[Path] = None,
+        inbox_path: Optional[Path] = None,
+        users_path: Optional[Path] = None,
+    ) -> None:
         """Initialize provider.
 
         Args:
-            storage_base: Base path for storage directory.
+            library_path: Path to the library (should be resolved).
+            oneshots_path: Optional path to the oneshots directory.
+            inbox_path: Path to the inbox directory.
+            users_path: Path to the users directory.
         """
         super().__init__()
-        self.storage_base = Path(storage_base)
-        self.path_mapper = PathMapper(storage_base)
+        self.storage_base = library_path.parent
+        self.path_mapper = PathMapper(library_path, oneshots_path, inbox_path, users_path)
         self.path_mapper.ensure_directories()
 
     def get_resource_inst(
