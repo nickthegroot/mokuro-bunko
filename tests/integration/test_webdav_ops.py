@@ -10,7 +10,7 @@ from typing import Any, Callable, Generator
 
 import pytest
 
-from mokuro_bunko.config import Config, StorageConfig
+from mokuro_bunko.config import Config, OneshotsConfig, StorageConfig
 from mokuro_bunko.database import Database
 from mokuro_bunko.server import create_app
 
@@ -150,9 +150,15 @@ def test_storage(temp_dir: Path) -> Path:
 
     # Create sample library files
     (storage / "library" / "manga1.cbz").write_bytes(b"fake cbz content 1")
+    (storage / "library" / "manga1.mokuro").write_bytes(b"manga1 mokuro")
     (storage / "library" / "manga2.cbz").write_bytes(b"fake cbz content 2")
     (storage / "library" / "series").mkdir()
     (storage / "library" / "series" / "vol1.cbz").write_bytes(b"volume 1")
+
+    # Create oneshots directory
+    (storage / "library" / "oneshots").mkdir()
+    (storage / "library" / "oneshots" / "oneshot.cbz").write_bytes(b"oneshot cbz")
+    (storage / "library" / "oneshots" / "oneshot.mokuro").write_bytes(b"oneshot mokuro")
 
     return storage
 
@@ -179,7 +185,12 @@ def test_db(test_storage: Path) -> Database:
 @pytest.fixture
 def test_config(test_storage: Path) -> Config:
     """Create test configuration."""
-    return Config(storage=StorageConfig(base_path=test_storage))
+    return Config(
+        storage=StorageConfig(
+            base_path=test_storage,
+            oneshots=OneshotsConfig(directory="oneshots"),
+        )
+    )
 
 
 @pytest.fixture
@@ -238,6 +249,18 @@ class TestPropfind:
         assert "manga2.cbz" in content
         assert "series" in content
 
+    def test_propfind_mokuro_reader_shows_sidecars(self, client: WSGITestClient) -> None:
+        """Test PROPFIND on mokuro-reader includes .mokuro sidecars."""
+        response = client.request(
+            "PROPFIND",
+            "/mokuro-reader",
+            headers={"Depth": "1"},
+        )
+        assert response.status_code == 207
+        content = response.text
+        assert "manga1.cbz" in content
+        assert "manga1.mokuro" in content
+
     def test_propfind_mokuro_reader_nested(self, client: WSGITestClient) -> None:
         """Test PROPFIND on nested folder under mokuro-reader."""
         response = client.request(
@@ -248,6 +271,18 @@ class TestPropfind:
         assert response.status_code == 207
         content = response.text
         assert "vol1.cbz" in content
+
+    def test_propfind_oneshots_shows_sidecars(self, client: WSGITestClient) -> None:
+        """Test PROPFIND on oneshots includes .mokuro sidecars."""
+        response = client.request(
+            "PROPFIND",
+            "/mokuro-reader/oneshots",
+            headers={"Depth": "1"},
+        )
+        assert response.status_code == 207
+        content = response.text
+        assert "oneshot.cbz" in content
+        assert "oneshot.mokuro" in content
 
     def test_propfind_mokuro_reader_depth_infinity_authenticated_injects_progress(
         self, client: WSGITestClient
@@ -319,6 +354,18 @@ class TestGet:
         response = client.get("/mokuro-reader/series/vol1.cbz")
         assert response.status_code == 200
         assert response.content == b"volume 1"
+
+    def test_get_root_mokuro_file(self, client: WSGITestClient) -> None:
+        """Test GET .mokuro sidecar from root library."""
+        response = client.get("/mokuro-reader/manga1.mokuro")
+        assert response.status_code == 200
+        assert response.content == b"manga1 mokuro"
+
+    def test_get_oneshot_mokuro_file(self, client: WSGITestClient) -> None:
+        """Test GET .mokuro sidecar from oneshots directory."""
+        response = client.get("/mokuro-reader/oneshots/oneshot.mokuro")
+        assert response.status_code == 200
+        assert response.content == b"oneshot mokuro"
 
     def test_get_nonexistent_file(self, client: WSGITestClient) -> None:
         """Test GET nonexistent file returns 404."""

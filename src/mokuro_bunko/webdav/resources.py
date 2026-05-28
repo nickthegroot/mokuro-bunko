@@ -675,6 +675,17 @@ class MokuroFolderResource(DAVCollection):
             return user_data.get("username")
         return None
 
+    @staticmethod
+    def _is_volume_file(name: str) -> bool:
+        """Check if a file is a volume (CBZ) or its sidecar."""
+        lower = name.lower()
+        if lower.endswith(".cbz"):
+            return True
+        for suffix in MokuroFileResource._VOLUME_SIDECAR_SUFFIXES:
+            if lower.endswith(suffix):
+                return True
+        return False
+
     def _get_database(self) -> Optional["Database"]:
         db = self.environ.get("mokuro.db")
         if db is None:
@@ -823,7 +834,9 @@ class MokuroFolderResource(DAVCollection):
                             pass
 
                     # Check if this directory has CBZ files
-                    has_cbz = any(f.lower().endswith(".cbz") for f in files)
+                    has_cbz = any(
+                        fname.lower().endswith(".cbz") for fname in files
+                    )
                     if has_cbz:
                         cbz_dirs.add(Path(root))
 
@@ -836,10 +849,10 @@ class MokuroFolderResource(DAVCollection):
 
                     parts = rel_path.parts
                     if len(parts) == 0:
-                        # Root library - add CBZ files directly
-                        for f in cbz_dir.iterdir():
-                            if f.is_file() and f.suffix.lower() == ".cbz":
-                                members.add(f.name)
+                        # Root library - add CBZ files and sidecars
+                        for child in cbz_dir.iterdir():
+                            if child.is_file() and self._is_volume_file(child.name):
+                                members.add(child.name)
                     elif len(parts) == 1:
                         # Single-level directory (e.g., "series") - add as-is
                         members.add(parts[0])
@@ -862,11 +875,11 @@ class MokuroFolderResource(DAVCollection):
             try:
                 for root, dirs, files in os.walk(oneshots_root):
                     dirs[:] = [d for d in sorted(dirs) if not d.startswith(".")]
-                    for f in sorted(files):
-                        if not f.lower().endswith(".cbz"):
+                    for fname in sorted(files):
+                        if not self._is_volume_file(fname):
                             continue
                         # Use filename only to avoid long path issues
-                        oneshots_members.add(f)
+                        oneshots_members.add(fname)
             except OSError:
                 pass
             return sorted(oneshots_members)
