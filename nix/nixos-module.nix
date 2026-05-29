@@ -126,6 +126,10 @@ in
       after = [ "network.target" ];
       wantedBy = [ "multi-user.target" ];
 
+      unitConfig = mkIf (cfg.data_path != null) {
+        RequiresMountsFor = cfg.data_path;
+      };
+
       serviceConfig = {
         ExecStart = "${cfg.package}/bin/mokuro-bunko --config ${yamlFormat.generate "mokuro-bunko-config.yaml" cfg.settings} serve";
         Restart = "always";
